@@ -156,3 +156,169 @@ kde_pg <- density.ppp(pg_km, sigma = bw_pg, edge = TRUE, kernel = "gaussian")
 plot(kde_pg, main = "Punggol KDE")
 
 ```
+
+## Chapter 05
+
+### Importing spatial data
+
+```{r}
+library(sf)
+library(tmap)
+library(spatstat)
+
+library(dplyr)
+
+# Childcare centres (point data)
+childcare_sf <- st_read("data/ChildCareServices.kml")
+
+# URA Master Plan 2019 Subzone Boundary (No Sea) (polygon data)
+mpsz_sf <- st_read("data/MasterPlan2019SubzoneBoundaryNoSeaKML.kml")
+
+summary(childcare_sf)
+summary(mpsz_sf)
+```
+
+### Visualizing Data Layers
+
+```{r}
+```
+
+```{r}
+tmap_mode('view')
+tm_shape(childcare_sf) + tm_dots()
+tmap_mode('plot')
+
+```
+
+```{}
+```
+
+### Convert to spatstat ppp 
+
+```{r}
+childcare_ppp <- as.ppp(childcare_sf)
+summary(childcare_ppp)
+
+```
+
+### Handling Duplicate Points
+
+```{r}
+any(duplicated(childcare_ppp))
+multiplicity(childcare_ppp)
+sum(multiplicity(childcare_ppp) > 1)
+
+childcare_ppp_jit <- rjitter(childcare_ppp, retry = TRUE, nsim = 1, drop = TRUE)
+any(duplicated(childcare_ppp_jit))
+```
+
+### Creating owin
+
+```{r}
+sg_owin <- as.owin(sg_sf)
+plot(sg_owin); summary(sg_owin)
+childcareSG_ppp <- childcare_ppp[sg_owin]
+
+```
+
+### Combining with Study Area
+
+```{r}
+pg <- filter(mpsz_sf, PLN_AREA_N == "PUNGGOL")
+# ... similarly tm, ck, jw
+pg_owin <- as.owin(pg)
+# ...
+childcare_ck_ppp <- childcare_ppp_jit[ck_owin]
+# ...
+
+childcare_ck_ppp.km <- rescale(childcare_ck_ppp, 1000, "km")
+
+
+```
+
+### G-Function
+
+#### Choa Chu Kang
+
+```{r}
+G_CK <- Gest(childcare_ck_ppp, correction = "border")
+plot(G_CK)
+G_CK.csr <- envelope(childcare_ck_ppp, Gest, nsim = 999)
+plot(G_CK.csr)
+
+```
+
+#### Tampines
+
+```{r}
+G_tm <- Gest(childcare_tm_ppp, correction = "best")
+plot(G_tm)
+G_tm.csr <- envelope(childcare_tm_ppp, Gest, correction = "all", nsim = 999)
+plot(G_tm.csr)
+```
+
+### F-Function
+
+#### Choa Chu Kang
+
+```{r}
+F_CK <- Fest(childcare_ck_ppp)
+plot(F_CK)
+F_CK.csr <- envelope(childcare_ck_ppp, Fest, nsim = 999)
+plot(F_CK.csr)
+
+```
+
+#### Tampines
+
+```{r}
+F_tm <- Fest(childcare_tm_ppp, correction = "best")
+plot(F_tm)
+F_tm.csr <- envelope(childcare_tm_ppp, Fest, correction = "all", nsim = 999)
+plot(F_tm.csr)
+
+```
+
+### K-Function
+
+#### Choa Chu Kang
+
+```{r}
+K_ck <- Kest(childcare_ck_ppp, correction = "Ripley")
+plot(K_ck, . - r ~ r)
+K_ck.csr <- envelope(childcare_ck_ppp, Kest, nsim = 99, rank = 1, glocal = TRUE)
+plot(K_ck.csr, . - r ~ r)
+
+```
+
+#### Tampines
+
+```{r}
+K_tm <- Kest(childcare_tm_ppp, correction = "Ripley")
+plot(K_tm, . - r ~ r, xlim = c(0,1000))
+K_tm.csr <- envelope(childcare_tm_ppp, Kest, nsim = 99, rank = 1, glocal = TRUE)
+plot(K_tm.csr, . - r ~ r, xlim = c(0,500))
+
+```
+
+### L-Function
+
+#### Choa Chu Kang
+
+```{r}
+L_ck <- Lest(childcare_ck_ppp, correction = "Ripley")
+plot(L_ck, . - r ~ r)
+L_ck.csr <- envelope(childcare_ck_ppp, Lest, nsim = 99, rank = 1, glocal = TRUE)
+plot(L_ck.csr, . - r ~ r)
+
+```
+
+#### Tampines
+
+```{r}
+L_tm <- Lest(childcare_tm_ppp, correction = "Ripley")
+plot(L_tm, . - r ~ r, xlim = c(0,1000))
+L_tm.csr <- envelope(childcare_tm_ppp, Lest, nsim = 99, rank = 1, glocal = TRUE)
+plot(L_tm.csr, . - r ~ r, xlim = c(0,500))
+
+```
