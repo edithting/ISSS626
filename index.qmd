@@ -1,0 +1,158 @@
+---
+title: "ISSS626"
+---
+
+This is a Quarto website.
+
+To learn more about Quarto websites visit <https://quarto.org/docs/websites>.
+
+```{r}
+1 + 1
+```
+
+```{r}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(sf, terra, spatstat, tmap, rvest, tidyverse)
+
+```
+
+### Read Polygon Layer
+
+```{r}
+mpsz_sf <- st_read("data/MasterPlan2019SubzoneBoundaryNoSeaKML.kml") |>
+  st_zm(drop = TRUE, what = "ZM") |>
+  st_transform(crs = 3414)
+
+extract_kml_field <- function(html_text, field_name) {
+  if (is.na(html_text) || html_text == "") return(NA_character_)
+  page <- rvest::read_html(html_text)
+  rows <- page |> html_elements("tr")
+  value <- rows |>
+    keep(~ html_text2(html_element(.x, "th")) == field_name) |>
+    html_element("td") |>
+    html_text2()
+  if (length(value) == 0) NA_character_ else value
+}
+
+mpsz_sf <- mpsz_sf |>
+  mutate(
+    REGION_N = map_chr(Description, extract_kml_field, "REGION_N"),
+    PLN_AREA_N = map_chr(Description, extract_kml_field, "PLN_AREA_N"),
+    SUBZONE_N = map_chr(Description, extract_kml_field, "SUBZONE_N"),
+    SUBZONE_C = map_chr(Description, extract_kml_field, "SUBZONE_C")
+  ) |>
+  select(-Name, -Description) |>
+  relocate(geometry, .after = last_col())
+
+mpsz_cl <- mpsz_sf |>
+  filter(SUBZONE_N != "SOUTHERN GROUP",
+         PLN_AREA_N != "WESTERN ISLANDS",
+         PLN_AREA_N != "NORTH-EASTERN ISLANDS")
+
+```
+
+### Read Point Layer
+
+```{r}
+childcare_sf <- st_read("data/ChildCareServices.kml") |>
+  st_zm(drop = TRUE, what = "ZM") |>
+  st_transform(crs = 3414)
+
+tmap_mode("view")
+tm_shape(childcare_sf) + tm_dots()
+tmap_mode("plot")
+```
+
+### Convert to spatstat objects
+
+```{r}
+childcare_ppp <- spatstat.geom::as.ppp(childcare_sf)
+sg_owin       <- spatstat.geom::as.owin(mpsz_cl)
+childcareSG_ppp <- childcare_ppp[sg_owin]
+```
+
+### Clark-Evans Tests
+
+```{r}
+# Z-test
+spatstat.explore::clarkevans.test(
+  childcareSG_ppp,
+  correction = "none",
+  clipregion = "sg_owin",
+  alternative = "clustered"
+)
+
+# Monte Carlo test
+spatstat.explore::clarkevans.test(
+  childcareSG_ppp,
+  correction = "none",
+  clipregion = "sg_owin",
+  alternative = "clustered",
+  method = "MonteCarlo",
+  nsim = 99
+)
+```
+
+### KDE
+
+```{r}
+library(spatstat.explore)
+library(spatstat.model)
+library(spatstat.geom)
+
+bw <- bw.diggle(childcareSG_ppp)
+
+kde_childcareSG <- density.ppp(childcareSG_ppp, sigma = bw)
+
+plot(kde_childcareSG)
+
+```
+
+### Rasterize KDE and map
+
+```{r}
+kde_rast <- terra::rast(kde_childcareSG)
+terra::crs(kde_rast) <- "EPSG:3414"
+
+tmap_mode("plot")
+tm_shape(kde_rast) +
+  tm_raster(col.scale = tm_scale_continuous(values = "viridis"),
+            col.legend = tm_legend(title = "Density (per km²)",
+                                   title.size = 0.7, text.size = 0.7,
+                                   bg.color = "white", bg.alpha = 0.7,
+                                   position = tm_pos_in("right","bottom"),
+                                   frame = TRUE)) +
+  tm_graticules(labels.size = 0.7) +
+  tm_compass() +
+  tm_layout(scale = 1)
+```
+
+### By Planning Area
+
+```{r}
+library(spatstat.explore)
+library(spatstat.model)
+library(spatstat.geom)   # or install from GitHub
+library(spatstat.explore)
+
+# Filter by planning area
+pg <- mpsz_cl |> filter(PLN_AREA_N == "PUNGGOL")
+tm <- mpsz_cl |> filter(PLN_AREA_N == "TAMPINES")
+
+# Convert to ppp objects
+pg_ppp <- childcare_ppp[as.owin(pg)]
+tm_ppp <- childcare_ppp[as.owin(tm)]
+
+# Rescale to km
+pg_km <- rescale(pg_ppp, 1000, "km")
+tm_km <- rescale(tm_ppp, 1000, "km")
+
+# Clark–Evans test in Tampines
+clarkevans.test(tm_ppp, correction="none", alternative="two.sided", nsim=999)
+
+# KDE in Punggol
+bw_pg <- bw.diggle(pg_km)
+kde_pg <- density.ppp(pg_km, sigma = bw_pg, edge = TRUE, kernel = "gaussian")
+plot(kde_pg, main = "Punggol KDE")
+
+```
