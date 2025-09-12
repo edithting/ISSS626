@@ -3,53 +3,80 @@ title: "Hands-on Exercise 3"
 ---
 
 ```{r}
-if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
-pacman::p_load(sf, raster, spatstat, sparr, tmap, tidyverse, lubridate)
+if(!requireNamespace("pacman", quietly=TRUE)) install.packages("pacman")
+pacman::p_load(sf, terra, spatstat, sparr, tmap, tidyverse, lubridate)
 ```
 
 ### Read & Prepare Study Area
 
 ```{r}
-library(sf)
-library(tmap)
-library(dplyr)
-library(readr)
-library(rmapshaper)
+library(rmapshaper)   # if not installed: install.packages("rmapshaper")
 
-# Read shapefile
-kbb_sf <- st_read("data/KBB.shp", quiet = TRUE)
-kbb_sf <- st_zm(kbb_sf, drop = TRUE, what = "ZM")
-kbb_sf <- st_make_valid(kbb_sf)
+# Read and clean shapefile
+kbb_sf <- st_read("data/KBB.shp") %>%
+  st_make_valid() %>%
+  st_transform(crs = 32748)
 
-# Simplify to make rendering faster
-kbb_sf <- ms_simplify(kbb_sf, keep = 0.02)
+# Simplify geometry (retain topology)
+kbb_sf <- rmapshaper::ms_simplify(kbb_sf, keep = 0.05) # keep 5% of vertices
 
-# Read forest fire data (FF.csv must have LONG and LAT columns)
-ff <- read.csv("data/FF.csv")
+# Convert to spatstat window -----------------------------
 
-# Convert to sf
-ff_sf <- st_as_sf(ff, coords = c("LONG", "LAT"), crs = 4326)
+library(spatstat.geom)
 
+# Safe conversion wrapper
+safe_as_owin <- function(sf_obj) {
+  tryCatch({
+    as.owin(sf_obj)
+  }, error = function(e) {
+    message("Initial as.owin() failed, repairing geometry...")
+    
+    sf_obj <- sf_obj %>%
+      st_make_valid() %>%
+      st_buffer(0) %>%                     # fix self-touching polygons
+      st_simplify(dTolerance = 50, preserveTopology = TRUE) %>%
+      st_cast("MULTIPOLYGON")
+    
+    # Retry conversion
+    as.owin(sf_obj)
+  })
+}
+
+# Apply
+kbb_owin <- safe_as_owin(kbb_sf)
 
 ```
 
 ### Import & Tidy Forest Fire Data
 
 ```{r}
-# Check data
-print(kbb_sf)
-head(ff_sf)
+# Read FF.csv (should contain: longitude, latitude, acq_date)
+fire_sf <- readr::read_csv("data/FF.csv") %>%
+  mutate(acq_date = lubridate::ymd(acq_date)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(crs = 32748) %>%
+  mutate(
+    DayofYear = lubridate::yday(acq_date),
+    Month_num = lubridate::month(acq_date),
+    Month_fac = lubridate::month(acq_date, label = TRUE, abbr = FALSE)
+  )
+
+# Preview data
+head(fire_sf)
+
 ```
 
 ### Visualise Forest Fires
 
 ```{r}
-tmap_mode("plot")  # static maps, works in Quarto
-tm_shape(KBB_simplified) +
-  tm_polygons("lightgrey", border.col = "white") +
-  tm_shape(FF_sf) +
-  tm_dots(col = "red", size = 0.1, alpha = 0.5)
-  # static mode, avoids crashes
+# Overall point distribution
+tm_shape(kbb_sf) + tm_polygons() +
+  tm_shape(fire_sf) + tm_dots()
+
+# Faceted map by month
+tm_shape(kbb_sf) + tm_polygons() +
+  tm_shape(fire_sf) + tm_dots(size = 0.1) +
+  tm_facets(by = "Month_fac", free.coords = FALSE, drop.units = TRUE)
 
 
 ```
@@ -57,70 +84,64 @@ tm_shape(KBB_simplified) +
 ### Convert Fires to `ppp` by Month
 
 ```{r}
-# Convert fire points to spatstat ppp
-ff_ppp <- as.ppp(ff_sf)
+# Use Month_num as mark
+fire_month <- fire_sf %>% select(Month_num)
+fire_month_ppp <- as.ppp(fire_month)
 
-# Rescale to kilometers
-ff_ppp_km <- spatstat.geom::rescale(ff_ppp, 1000, "km")
+# Clip to study region
+fire_month_owin <- fire_month_ppp[kbb_owin]
 
-ff_ppp_km
+# Check summary
+summary(fire_month_owin)
+plot(fire_month_owin, main = "Forest Fire Points with KBB Window")
+
 ```
 
 ### Spatio-Temporal KDE
 
 ```{r}
-# KDE with Diggle bandwidth
-kde_map <- density(ff_ppp_km, sigma = bw.diggle(ff_ppp_km),
-                   edge = TRUE, kernel = "gaussian")
+# KDE calculation
+st_kde <- spattemp.density(fire_month_owin)
 
-plot(kde_map, main = "Kernel Density of Forest Fires")
+# View summary
+summary(st_kde)
+
 ```
 
 ### Plot KDE (Jul - Dec)
 
 ```{r}
-# Clark–Evans test for spatial randomness
-clarkevans.test(ff_ppp, correction = "none", alternative = "two.sided")
-
+# Plot KDE for months 7–12
+tims <- c(7,8,9,10,11,12)
+par(mfcol = c(2,3))
+for(i in tims){
+  plot(st_kde, i, override.par = FALSE, fix.range = TRUE,
+       main = paste("KDE at month", i))
+}
 ```
 
 ### STKDE by Day of Year
 
 ```{r}
-# Aggregate fires into polygons (count per region)
-ff_joined <- st_join(kbb_sf, ff_sf, join = st_contains)
+# Use DayofYear as mark
+fire_yday <- fire_sf %>% select(DayofYear)
+fire_yday_ppp <- as.ppp(fire_yday)
 
-# Count number of fires per polygon
-fire_count <- ff_joined %>%
-  group_by(geometry) %>%
-  summarise(Fire_Count = n())
+# Clip to study region
+fire_yday_owin <- fire_yday_ppp[kbb_owin]
 
-# Build neighbors list
-nb <- poly2nb(fire_count)
-lw <- nb2listw(nb, style = "W")
+# KDE calculation
+st_kde_yday <- spattemp.density(fire_yday_owin)
 
-# Moran’s I
-moran.test(fire_count$Fire_Count, lw)
+# View summary
+summary(st_kde_yday)
 
-```
-
-## Improved STKDE using Bootstrap Bandwidth
-
-```{r}
-# Local Moran’s I
-local_moran <- localmoran(fire_count$Fire_Count, lw)
-
-# Add results back to sf
-fire_count$Ii <- local_moran[, "Ii"]
-fire_count$Cluster <- factor(ifelse(local_moran[, "Pr(z > 0)"] < 0.05,
-                                    ifelse(local_moran[, "Ii"] > 0, "High-High", "Low-Low"),
-                                    "Not Significant"))
-
-# Map LISA clusters
-tm_shape(fire_count) +
-  tm_polygons("Cluster", palette = c("red", "blue", "grey"),
-              title = "LISA Cluster") +
-  tm_layout(main.title = "Local Moran’s I (LISA) of Forest Fires")
+# Plot for first 6 days (example)
+par(mfcol = c(2,3))
+for(i in 1:6){
+  plot(st_kde_yday, i, override.par = FALSE, fix.range = TRUE,
+       main = paste("KDE at day", i))
+}
 
 ```
 
