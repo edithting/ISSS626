@@ -1,5 +1,12 @@
 ---
 title: "Hands-on Exercise 3"
+author: "Yiwen Ding"
+
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  freeze: true
 ---
 
 ```{r}
