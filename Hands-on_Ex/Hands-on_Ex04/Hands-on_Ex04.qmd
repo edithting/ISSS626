@@ -1,0 +1,169 @@
+---
+title: "Hands-on Exercise 4"
+author: "Yiwen Ding"
+
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  freeze: true
+---
+
+```{r}
+# Set CRAN mirror first
+options(repos = c(CRAN = "https://cran.r-project.org"))
+
+install.packages(c("sf", "tmap", "tidyverse", "ggplot2", "ggspatial", 
+                  "leaflet", "sp", "raster", "spdep", "htmlwidgets"))
+```
+
+```{r}
+
+# Load required packages
+library(sf)
+library(tmap)
+library(tidyverse)
+library(leaflet)
+
+# 1. LOADING AND EXPLORING DATA
+# Load shapefile from data/geospatial
+shp_file <- st_read("data/geospatial/Hunan.shp")
+
+# Load CSV file from data/aspatial
+csv_data <- read.csv("data/aspatial/Hunan_2012.csv")
+
+# 2. EXPLORE DATA STRUCTURE
+cat("=== SHAPEFILE INFORMATION ===\n")
+print(shp_file)
+cat("\nShapefile column names:\n")
+print(names(shp_file))
+cat("\nFirst few rows of shapefile:\n")
+print(head(shp_file))
+
+cat("\n=== CSV DATA INFORMATION ===\n")
+cat("CSV column names:\n")
+print(names(csv_data))
+cat("\nFirst few rows of CSV:\n")
+print(head(csv_data))
+cat("\nCSV structure:\n")
+str(csv_data)
+
+# 3. IDENTIFY COMMON COLUMNS FOR JOINING
+# Find potential common columns
+shapefile_cols <- names(shp_file)
+csv_cols <- names(csv_data)
+
+# Look for common column names
+common_cols <- intersect(shapefile_cols, csv_cols)
+cat("\n=== POTENTIAL JOIN COLUMNS ===\n")
+if(length(common_cols) > 0) {
+  cat("Common columns found:", paste(common_cols, collapse = ", "), "\n")
+} else {
+  cat("No common column names found. Looking for similar patterns...\n")
+  
+  # Check for columns that might contain similar data (like ID, code, etc.)
+  possible_id_cols_shp <- shapefile_cols[grepl("id|ID|code|Code|name|Name", shapefile_cols)]
+  possible_id_cols_csv <- csv_cols[grepl("id|ID|code|Code|name|Name", csv_cols)]
+  
+  cat("Possible ID columns in shapefile:", paste(possible_id_cols_shp, collapse = ", "), "\n")
+  cat("Possible ID columns in CSV:", paste(possible_id_cols_csv, collapse = ", "), "\n")
+}
+
+# 4. MANUAL COLUMN SELECTION FOR JOINING
+# Replace these with your actual column names based on the output above
+shapefile_join_col <- "OBJECTID"  # Change this to your shapefile's join column
+csv_join_col <- "ID"              # Change this to your CSV's join column
+
+# Verify the columns exist
+if(shapefile_join_col %in% names(shp_file) && csv_join_col %in% names(csv_data)) {
+  cat("\nJoining using:", shapefile_join_col, "(shapefile) and", csv_join_col, "(CSV)\n")
+  
+  # 5. DATA CLEANING
+  csv_data_clean <- csv_data %>%
+    mutate(across(where(is.character), as.factor)) %>%
+    drop_na(all_of(csv_join_col))  # Remove rows with missing join key
+  
+  # 6. JOIN THE DATA
+  spatial_joined <- shp_file %>%
+    left_join(csv_data_clean, by = setNames(csv_join_col, shapefile_join_col))
+  
+  cat("\n=== AFTER JOINING ===\n")
+  cat("New data structure:\n")
+  print(spatial_joined)
+  cat("\nNew column names:\n")
+  print(names(spatial_joined))
+  
+  # 7. BASIC MAPPING
+  # Find numeric columns for mapping
+  numeric_cols <- names(spatial_joined)[sapply(spatial_joined, is.numeric)]
+  cat("\nNumeric columns available for mapping:", paste(numeric_cols, collapse = ", "), "\n")
+  
+  if(length(numeric_cols) > 0) {
+    # Create a simple map using the first numeric column
+    map_variable <- numeric_cols[1]
+    
+    map1 <- tm_shape(spatial_joined) +
+      tm_polygons(map_variable,
+                  style = "quantile",
+                  palette = "Blues",
+                  title = map_variable) +
+      tm_layout(main.title = paste("Map of", map_variable),
+                main.title.position = "center")
+    
+    print(map1)
+    
+    # 8. INTERACTIVE MAP
+    interactive_map <- leaflet() %>%
+      addTiles() %>%
+      addPolygons(data = spatial_joined,
+                  weight = 1,
+                  color = "black",
+                  fillColor = ~colorQuantile("YlOrRd", spatial_joined[[map_variable]])(spatial_joined[[map_variable]]),
+                  fillOpacity = 0.7,
+                  popup = ~paste("Value:", spatial_joined[[map_variable]]))
+    
+    print(interactive_map)
+  }
+  
+} else {
+  cat("\n=== ERROR: JOIN COLUMNS NOT FOUND ===\n")
+  if(!shapefile_join_col %in% names(shp_file)) {
+    cat("Column", shapefile_join_col, "not found in shapefile.\n")
+  }
+  if(!csv_join_col %in% names(csv_data)) {
+    cat("Column", csv_join_col, "not found in CSV.\n")
+  }
+  cat("Available shapefile columns:", paste(names(shp_file), collapse = ", "), "\n")
+  cat("Available CSV columns:", paste(names(csv_data), collapse = ", "), "\n")
+}
+
+# 9. ALTERNATIVE: IF NO COMMON COLUMNS, SHOW SEPARATE MAPS
+if(!exists("spatial_joined")) {
+  cat("\nCreating separate maps since join wasn't possible...\n")
+  
+  # Map of just the shapefile
+  tm_shape(shp_file) +
+    tm_polygons() +
+    tm_layout(title = "Shapefile Geometry")
+  
+  # If CSV has spatial coordinates, you could create a point map
+  if(any(grepl("lat|long|x|y", names(csv_data), ignore.case = TRUE))) {
+    coords_cols <- names(csv_data)[grepl("lat|long|x|y", names(csv_data), ignore.case = TRUE)]
+    cat("Potential coordinate columns in CSV:", paste(coords_cols, collapse = ", "), "\n")
+  }
+}
+
+# 10. CREATE OUTPUT DIRECTORY
+if(!dir.exists("output")) {
+  dir.create("output")
+}
+
+# Save the joined data if it exists
+if(exists("spatial_joined")) {
+  st_write(spatial_joined, "output/joined_data.shp", delete_layer = TRUE)
+  cat("\nJoined data saved to output/joined_data.shp\n")
+}
+
+cat("\n=== ANALYSIS COMPLETED ===\n")
+
+```

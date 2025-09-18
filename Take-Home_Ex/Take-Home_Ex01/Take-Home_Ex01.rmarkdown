@@ -1,0 +1,68 @@
+---
+title: "ISSS626"
+---
+
+This is a Quarto website.
+
+To learn more about Quarto websites visit <https://quarto.org/docs/websites>.
+
+```{r}
+pacman::p_load(httr, sf, dplyr, tidyverse, lubridate)
+```
+
+```{r}
+folder_path <- "data/aspatial/acra"
+file_list <- list.files(path = folder_path,
+                        pattern = "^ACRA*.*\\.csv$",
+                        full.names = TRUE)
+
+acra_data <- file_list %>%
+  map_dfr(read_csv)
+```
+
+```{r}
+write_rds(acra_data,
+          "data/rds/acra_data.rds")
+```
+
+### Tidying ACRA data
+
+```{r}
+biz_56111 <- acra_data %>%
+  select(1:24) %>%
+  filter(primary_ssic_code == 56111) %>%
+  rename(date = registration_incorporation_date) %>%
+  mutate(date = as.Date(date),
+         YEAR = year(date),
+         MONTH_NUM = month(date),
+         MONTH_ABBR = month(date,
+                            label = TRUE,
+                            abbr = TRUE)) %>%
+  mutate(
+    postal_code = str_pad(postal_code,
+    width = 6, side = "left", pad = "0")) %>%
+           filter(YEAR ==2025)
+```
+
+### Geocoding
+
+```{r}
+postcodes <- unique(biz_56111$postal_code)
+
+url <- "https://onemap.gov.sg/api/common/elastic/search"
+
+found <- data.frame()
+not_found <- data.frame(postcode = character())
+
+for (pc in postcodes){
+  query <- list(
+    searchVal = pc,
+    returnGeom = "Y",
+    getAddrDetails = "Y",
+    pageNum = "1"
+  )
+}
+  
+  
+```
+
