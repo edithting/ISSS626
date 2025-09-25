@@ -1,0 +1,144 @@
+---
+title: "Hands-on Exercise 5a"
+author: "Yiwen Ding"
+
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  freeze: true
+---
+
+```{r}
+# Load required packages
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(sf, spdep, tmap, tidyverse)
+
+# --------------------------------------------------
+# 1. Read spatial data (Hunan county‐level shapefile)
+# --------------------------------------------------
+hunan <- st_read(dsn = "data/geospatial", layer = "Hunan")
+
+# Check
+print(hunan)
+st_geometry_type(hunan)
+st_crs(hunan)
+
+# --------------------------------------------------
+# 2. Read aspatial CSV data (development indicators)
+# --------------------------------------------------
+hunan2012 <- read_csv("data/aspatial/Hunan_2012.csv")
+
+glimpse(hunan2012)
+
+# --------------------------------------------------
+# 3. Join the attribute data to shapefile
+# --------------------------------------------------
+hunan <- hunan %>%
+  left_join(hunan2012, by = "County")  
+
+# --------------------------------------------------
+# 4. Visualising the development indicator (e.g. GDPPC)
+# --------------------------------------------------
+
+map_equal <- tm_shape(hunan) +
+  tm_polygons("GDPPC",
+              style = "equal",
+              n = 5,
+              palette = "Blues",
+              title = "GDPPC (equal)") +
+  tm_borders(alpha = 0.5) +
+  tm_layout(main.title = "GDPPC (Equal-interval)")
+
+map_quantile <- tm_shape(hunan) +
+  tm_polygons("GDPPC",
+              style = "quantile",
+              n = 5,
+              palette = "Blues",
+              title = "GDPPC (quantile)") +
+  tm_borders(alpha = 0.5) +
+  tm_layout(main.title = "GDPPC (Quantile)")
+
+# Arrange side by side
+tmap_arrange(map_equal, map_quantile, ncol = 2, asp = 1)
+
+# --------------------------------------------------
+# 5. Build spatial weights (contiguity)
+# --------------------------------------------------
+# Queen contiguity
+wm_q <- poly2nb(hunan, queen = TRUE)
+
+# Summary
+summary(wm_q)
+
+# Row‐standardised weights
+rswm_q <- nb2listw(wm_q, style = "W", zero.policy = TRUE)
+
+# Inspect
+rswm_q
+
+# --------------------------------------------------
+# 6. Global Moran’s I
+# --------------------------------------------------
+# (a) Moran’s I test
+mi <- moran.test(hunan$GDPPC, listw = rswm_q, zero.policy = TRUE, na.action = na.omit)
+print(mi)
+
+# (b) Monte Carlo permutation test
+set.seed(1234)
+mi_mc <- moran.mc(hunan$GDPPC, listw = rswm_q, nsim = 999, zero.policy = TRUE, na.action = na.omit)
+print(mi_mc)
+
+# Visualise simulated Moran’s I
+hist(mi_mc$res, breaks = 20, main = "Simulated Moran's I", xlab = "Moran's I")
+abline(v = mi_mc$statistic, col = "red", lwd = 2)
+
+# (Optional) use ggplot2 for nicer histogram
+library(ggplot2)
+df_mi <- data.frame(sim = mi_mc$res)
+ggplot(df_mi, aes(sim)) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "grey30") +
+  geom_vline(xintercept = mi_mc$statistic, color = "red", size = 1.2) +
+  labs(title = "Monte Carlo distribution of Moran's I",
+       x = "Simulated Moran's I", y = "Count")
+
+# --------------------------------------------------
+# 7. Global Geary’s C
+# --------------------------------------------------
+# (a) Geary’s C test
+gc <- geary.test(hunan$GDPPC, listw = rswm_q, zero.policy = TRUE)
+print(gc)
+
+# (b) Monte Carlo Geary’s C
+set.seed(1234)
+gc_mc <- geary.mc(hunan$GDPPC, listw = rswm_q, nsim = 999, zero.policy = TRUE)
+print(gc_mc)
+
+# Histogram for Geary’s C
+hist(gc_mc$res, breaks = 20, main = "Simulated Geary's C", xlab = "Geary's C")
+abline(v = gc_mc$statistic, col = "red", lwd = 2)
+
+# --------------------------------------------------
+# 8. Spatial Correlogram (Moran’s I & Geary’s C)
+# --------------------------------------------------
+# (a) Moran’s I correlogram
+mi_corr <- sp.correlogram(wm_q, hunan$GDPPC, order = 6, method = "I", style = "W")
+plot(mi_corr)
+print(mi_corr)
+
+# (b) Geary’s C correlogram
+gc_corr <- sp.correlogram(wm_q, hunan$GDPPC, order = 6, method = "C", style = "W")
+plot(gc_corr)
+print(gc_corr)
+
+# --------------------------------------------------
+# 9. Save outputs
+# --------------------------------------------------
+# Save shapefile with attributes
+st_write(hunan, "output/hunan_global_autocorr.shp", delete_layer = TRUE)
+
+# Save tmap as image (choose one of the maps)
+tmap_save(map_quantile, filename = "output/hunan_GDPPC_map.png")
+
+
+```

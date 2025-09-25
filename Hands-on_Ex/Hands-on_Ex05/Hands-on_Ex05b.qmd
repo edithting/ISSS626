@@ -1,0 +1,121 @@
+---
+title: "Hands-on Exercise 5b"
+author: "Yiwen Ding"
+
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  freeze: true
+---
+
+```{r}
+# Load required libraries
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(sf, spdep, tmap, tidyverse)
+
+# 1. Read the shapefile
+hunan <- st_read(dsn = "data/geospatial", layer = "Hunan")
+# (Alternatively, st_read("data/geospatial/Hunan.shp") )
+
+# 2. Read the CSV file
+hunan2012 <- read_csv("data/aspatial/Hunan_2012.csv")
+
+# 3. Join the CSV data to the spatial object
+hunan <- left_join(hunan, hunan2012, by = "County")
+
+# Optionally select or reorder columns
+hunan <- hunan %>%
+  select(1:4, 7, everything())
+
+# 4. Create contiguity-based spatial weights (Queen criterion)
+wm_q <- poly2nb(hunan, queen = TRUE)
+rswm_q <- nb2listw(wm_q, style = "W", zero.policy = TRUE)
+
+# 5. Compute local Moran’s I for a variable
+localMI <- localmoran(hunan$GDPPC, rswm_q)
+
+colnames(localMI)
+head(localMI)
+
+# 6. Attach the resulting local Moran’s I results back to the spatial object
+pval_col <- grep("^Pr", colnames(localMI), value = TRUE)
+
+# Rename p-value column safely
+names(localMI)[names(localMI) == "Pr(z != E(Ii))"] <- "Pr.Ii"
+
+# Combine with spatial data
+hunan.localMI <- cbind(hunan, localMI)
+
+# Check column names
+colnames(hunan.localMI)
+# Should include "Pr.Ii"
+
+### --- Section 7: Local Moran’s I and significance map ---
+
+# Compute local Moran’s I
+localMI <- localmoran(hunan$GDPPC, rswm_q)
+
+# Attach results to hunan
+hunan.localMI <- cbind(hunan, localMI)
+
+# Rename the messy p-value column "Pr(z != E(Ii))" → "Pr.Ii"
+hunan.localMI <- hunan.localMI %>%
+  rename(Pr.Ii = Pr.z....E.Ii..)
+
+# Check result
+colnames(hunan.localMI)
+
+# Map of Local Moran’s I
+map_Ii <- tm_shape(hunan.localMI) +
+  tm_fill(col = "Ii",
+          style = "pretty",
+          palette = "RdBu",
+          title = "Local Moran’s I") +
+  tm_borders(alpha = 0.5)
+
+# Map of p-values
+map_p <- tm_shape(hunan.localMI) +
+  tm_fill(col = "Pr.Ii",
+          breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf),
+          palette = "-Blues",
+          title = "p-value of Local Moran’s I") +
+  tm_borders(alpha = 0.5)
+
+tmap_arrange(map_Ii, map_p, asp = 1, ncol = 2)
+
+
+
+### --- Section 8: LISA cluster map (High-High, Low-Low, etc.) ---
+
+# Compute spatial lag of GDPPC
+hunan$lag_GDPPC <- lag.listw(rswm_q, hunan$GDPPC)
+
+# Standardize GDPPC and lag
+z <- scale(hunan.localMI$GDPPC)[,1]
+lag_z <- scale(hunan$lag_GDPPC)[,1]
+
+# Significance level
+signif_level <- 0.05
+
+# Identify significant areas
+hunan.localMI$quad_sig <- NA
+hunan.localMI$quad_sig[z >= 0 & lag_z >= 0 & hunan.localMI$Pr.Ii <= signif_level] <- "High-High"
+hunan.localMI$quad_sig[z <= 0 & lag_z <= 0 & hunan.localMI$Pr.Ii <= signif_level] <- "Low-Low"
+hunan.localMI$quad_sig[z >= 0 & lag_z <= 0 & hunan.localMI$Pr.Ii <= signif_level] <- "High-Low"
+hunan.localMI$quad_sig[z <= 0 & lag_z >= 0 & hunan.localMI$Pr.Ii <= signif_level] <- "Low-High"
+hunan.localMI$quad_sig[is.na(hunan.localMI$quad_sig)] <- "Not Significant"
+
+# Convert to factor for mapping
+hunan.localMI$quad_sig <- factor(hunan.localMI$quad_sig,
+                                 levels = c("High-High", "Low-Low", "High-Low", "Low-High", "Not Significant"))
+
+# LISA cluster map
+tm_shape(hunan.localMI) +
+  tm_fill("quad_sig",
+          palette = c("red", "blue", "orange", "lightblue", "grey80"),
+          title = "LISA Cluster Map") +
+  tm_borders(alpha = 0.5)
+
+
+```
