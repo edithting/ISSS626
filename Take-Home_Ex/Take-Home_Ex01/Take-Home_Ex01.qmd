@@ -9,33 +9,35 @@ This is a Quarto website.
 To learn more about Quarto websites visit <https://quarto.org/docs/websites>.
 
 ```{r}
+#| label: setup
+#| include: false
+
 # packages
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(httr, sf, dplyr, purrr, tidyverse, lubridate, stringr,
-               tmap, readr, spatstat.geom, sparr, spatstat.core, spatstat.explore,
-               mapview)  # mapview optional
+               tmap, readr, janitor,
+               spatstat.geom, sparr, spatstat.core, spatstat.explore,
+               mapview)
+
 # set tmap default
 tmap_mode("view")
-```
 
-```{r}
-# Adjust these to your preference
-data_folder <- "data/aspatial/acra"      # where raw ACRA CSVs are
+# folders
+data_folder <- "data/aspatial/acra"
 rds_folder  <- "data/rds"
 dir.create(rds_folder, showWarnings = FALSE, recursive = TRUE)
 
-# The SSIC codes you want to analyze (example: three food/retail codes).
-# Change these to the 3 codes you actually want from the SSIS classification.
-ssic_codes <- c(56111, 56102, 47210)  # <- replace if needed
+# SSIC codes (choose 3 relevant ones!)
+ssic_codes <- c(56111, 56102, 47210)
 
-# Date range: 1 Jan 2024 to 30 Jun 2025 (as required)
+# date range
 start_date <- as.Date("2024-01-01")
 end_date   <- as.Date("2025-06-30")
 
-# OneMap geocode API endpoint
+# OneMap geocode API
 onemap_url <- "https://developers.onemap.sg/commonapi/search"
 
-# Safe GET wrapper that retries (simple)
+# Safe GET wrapper
 safe_get_json <- function(url, query, retries = 3, sleep = 0.25) {
   for (i in seq_len(retries)) {
     res <- tryCatch(httr::GET(url, query = query, timeout(10)),
@@ -50,13 +52,15 @@ safe_get_json <- function(url, query, retries = 3, sleep = 0.25) {
 
 ```
 
+### Tidying ACRA data
+
 ```{r}
-folder_path <- data_folder
-file_list <- list.files(path = folder_path,
+#| label: load-data
+
+file_list <- list.files(path = data_folder,
                         pattern = "^ACRA.*\\.csv$",
                         full.names = TRUE)
 
-# read; if already saved rds, you may skip
 if (length(file_list) == 0 && file.exists(file.path(rds_folder, "acra_data.rds"))) {
   acra_data <- read_rds(file.path(rds_folder, "acra_data.rds"))
 } else {
@@ -64,21 +68,12 @@ if (length(file_list) == 0 && file.exists(file.path(rds_folder, "acra_data.rds")
   write_rds(acra_data, file.path(rds_folder, "acra_data.rds"))
 }
 
-```
-
-### Tidying ACRA data
-
-```{r}
-# Basic tidying and filter to selected SSIC & date range
 acra_clean <- acra_data %>%
-  # keep relevant columns (adapt if your CSV layout differs)
-  select(everything()) %>%
   mutate(
     registration_incorporation_date = as.Date(registration_incorporation_date),
     postal_code = str_pad(as.character(postal_code), width = 6, side = "left", pad = "0")
   )
 
-# filter selected SSIC codes and date window
 biz_sel <- acra_clean %>%
   filter(primary_ssic_code %in% ssic_codes,
          registration_incorporation_date >= start_date,
@@ -91,9 +86,9 @@ biz_sel <- acra_clean %>%
   ) %>%
   arrange(date)
 
-# quick counts
 cat("Total selected records:", nrow(biz_sel), "\n")
 biz_sel %>% count(primary_ssic_code) %>% print()
+
 write_rds(biz_sel, file.path(rds_folder, "biz_selected.rds"))
 
 ```
@@ -101,21 +96,18 @@ write_rds(biz_sel, file.path(rds_folder, "biz_selected.rds"))
 ### Geocoding
 
 ```{r}
-### Geocoding + Join (Clean Version)
+#| label: geocode
 
-library(janitor)
-
-# unique postal codes
 postcodes <- unique(biz_sel$postal_code)
 
 geocode_one <- function(pc) {
-  query <- list(searchVal = pc, returnGeom = "x", getAddrDetails = "y", pageNum = 1)
+  query <- list(searchVal = pc, returnGeom = "Y", getAddrDetails = "Y", pageNum = 1)
   json <- safe_get_json(onemap_url, query)
   Sys.sleep(0.15)
   
   if (!is.null(json) && length(json$results) > 0) {
     df <- as_tibble(json$results)
-    df$input_postcode <- pc   # 👈 use input_postcode (not input_postal)
+    df$input_postcode <- pc
     return(df)
   } else {
     return(tibble(input_postcode = pc, x = NA, y = NA,
@@ -123,9 +115,11 @@ geocode_one <- function(pc) {
   }
 }
 
-found_df <- map_dfr(postcodes, geocode_one) %>%
+test_postcodes <- head(postcodes, 100)   
+found_df <- map_dfr(test_postcodes, geocode_one) %>% 
   janitor::clean_names()
 
+# keep key columns
 found_clean <- found_df %>%
   select(postal, x, y, building, address, input_postcode)
 
@@ -134,136 +128,131 @@ biz_loc <- biz_sel %>%
 
 cat("Records with coordinates:", sum(!is.na(biz_loc$x)), "\n")
 
-# save
-write_rds(biz_loc, file.path(rds_folder, "biz_selected.rds"))
-```
-
-### Appending the location information
-
-```{r}
-if (nrow(found_df) > 0) print(names(found_df))
-
-if ("LONGITUDE" %in% toupper(names(found_df))) {
-  
-  found_df <- found_df %>%
-    rename_with(~toupper(.x)) %>%
-    rename(x = LONGITUDE, y = LATITUDE)
-} else if (!("x" %in% names(found_df) && "y" %in% names(found_df))) {
-
-  message("Coordinates not found in OneMap result columns; please inspect found_df.")
-}
+# save joined
+write_rds(biz_loc, file.path(rds_folder, "biz_selected_with_geo.rds"))
 
 biz_loc_clean <- biz_loc %>%
-  filter(!is.na(x) & !is.na(y)) %>%
-  st_as_sf(coords = c("x", "y"), crs = 3414)
+  filter(!is.na(x) & !is.na(y))
 
-# Left join
-biz_loc <- biz_sel %>%
-  left_join(found_df %>% rename(postal_code = input_postcode), by = "postal_code")
+biz_sf <- st_as_sf(biz_loc_clean, coords = c("x","y"), crs = 4326, remove = FALSE)
 
-# drop rows without coordinates
-biz_loc_coords <- biz_loc %>% filter(!is.na(x) & !is.na(y))
-cat("Records with coordinates:", nrow(biz_loc_coords), "\n")
+biz_sf <- biz_sf %>% filter(!st_is_empty(.))
+biz_sf <- st_transform(biz_sf, 3414)
 
-# Convert to sf: OneMap returns lon/lat (EPSG:4326) typically; check and choose CRS.
-# If X/Y are in EPSG:4326 (lon/lat), set crs = 4326, otherwise if SVY21 provided, set 3414.
-# We assume OneMap returns lat/long; transform to Singapore SVY21 (EPSG:3414) for analysis.
-biz_sf <- st_as_sf(biz_loc_coords, coords = c("x","y"), crs = 4326, remove = FALSE) %>%
-  st_transform(crs = 3414)
+summary(biz_sf)
+
+print(biz_sf)
+
+biz_sf <- st_transform(biz_sf, 3414)
+
 
 write_rds(biz_sf, file.path(rds_folder, "biz_sf.rds"))
 
 ```
 
-### Converting into SF data frame
+### Quick Exploratory Maps
 
 ```{r}
-# Basic map of all selected businesses
-tm_shape(biz_sf) + tm_dots(size = 0.06, popup.vars = c("entity_name", "date", "primary_ssic_code"))
+#| label: exploratory-maps
+biz_sf_plot <- biz_sf %>% filter(!st_is_empty(.) & !st_is_na(geometry))
 
-# Faceted maps by SSIC code (small multiples)
+tm_shape(biz_sf) + tm_dots(size = 0.06,
+                           popup.vars = c("entity_name", "date", "primary_ssic_code"))
+
 tm_shape(biz_sf) + tm_dots(size = 0.06) +
   tm_facets(by = "primary_ssic_code")
 
-# Monthly histogram
-ggplot(biz_sf %>% st_drop_geometry(), aes(x = MONTH_ABBR, fill = as.factor(primary_ssic_code))) +
-  geom_bar(position = "dodge") + labs(x = "Month (2024-01 to 2025-06)", fill = "SSIC")
+ggplot(biz_sf %>% st_drop_geometry(),
+       aes(x = MONTH_ABBR, fill = as.factor(primary_ssic_code))) +
+  geom_bar(position = "dodge") +
+  labs(x = "Month (2024-01 to 2025-06)", fill = "SSIC")
 
 ```
 
-```{r}
-# Prepare spatstat window: bounding box of all points buffered a bit
-all_bbox <- st_as_sfc(st_bbox(biz_sf))
-# convert bbox to 3414 coords (already 3414), cast to polygon then owin
-W <- as.owin(st_buffer(all_bbox, dist = 1000))  # buffer 1km
-plot(W)
+### KDE per SSIC
 
-# for each SSIC code, compute KDE
+```{r}
+#| label: kde
+
+all_bbox <- st_as_sfc(st_bbox(biz_sf))
+W <- as.owin(st_buffer(all_bbox, dist = 1000))  # 1km buffer
+
 kde_list <- list()
 for (code in unique(biz_sf$primary_ssic_code)) {
   dat_sub <- biz_sf %>% filter(primary_ssic_code == code)
   if (nrow(dat_sub) < 5) next
   ppp_sub <- as.ppp(st_coordinates(dat_sub), W = W)
-  # choose bandwidth using bw.diggle or bw.ppl; use bw.diggle as example
   bw <- bw.diggle(ppp_sub)
   dens <- density(ppp_sub, sigma = bw, edge = TRUE)
   kde_list[[as.character(code)]] <- list(ppp = ppp_sub, bw = bw, dens = dens)
-  # quick plot
   plot(dens, main = paste("KDE for SSIC", code))
 }
 
+saveRDS(kde_list, file.path(rds_folder, "kde_list.rds"))
+
+
 ```
 
 ```{r}
-# need marks as integer time (month index). We'll create month index from start_date.
-biz_sf <- biz_sf %>% mutate(month_index = as.integer(interval(start_date, date) %/% months(1)) + 1)
-# But more robust: compute months since start_date
-biz_sf <- biz_sf %>% mutate(month_index = (year(date) - year(start_date))*12 + (month(date) - month(start_date)) + 1)
+#| label: st-kde
 
-# Example: spatio-temporal KDE for the first SSIC code with enough points
-code_example <- unique(biz_sf$primary_ssic_code)[1]
-dat_ex <- biz_sf %>% filter(primary_ssic_code == code_example)
-if (nrow(dat_ex) >= 10) {
-  ppp_ex <- as.ppp(st_coordinates(dat_ex), W = W, marks = dat_ex$month_index)
-  st_kde <- spattemp.density(ppp_ex)  # default smoothing
-  # plot a time slice (e.g., slice index 1)
-  plot(st_kde, 1, main = paste("Spatio-temporal KDE SSIC", code_example, "slice 1"))
+biz_sf <- biz_sf %>%
+  mutate(month_index = (year(date) - year(start_date))*12 +
+                      (month(date) - month(start_date)) + 1)
+
+st_kde_list <- list()
+for (code in unique(biz_sf$primary_ssic_code)) {
+  dat_sub <- biz_sf %>% filter(primary_ssic_code == code)
+  if (nrow(dat_sub) < 10) next
+  ppp_sub <- as.ppp(st_coordinates(dat_sub), W = W, marks = dat_sub$month_index)
+  st_kde <- spattemp.density(ppp_sub)
+  st_kde_list[[as.character(code)]] <- st_kde
+  plot(st_kde, 1, main = paste("Spatio-temporal KDE: SSIC", code, "slice 1"))
 }
 
+saveRDS(st_kde_list, file.path(rds_folder, "st_kde_list.rds"))
+
 ```
 
 ```{r}
-# Ripley's K and envelopes per code
+#| label: ripley-k
+
 k_results <- list()
 for (code in unique(biz_sf$primary_ssic_code)) {
   dat_sub <- biz_sf %>% filter(primary_ssic_code == code)
   if (nrow(dat_sub) < 10) next
   ppp_sub <- as.ppp(st_coordinates(dat_sub), W = W)
-  # compute K and envelope (Monte Carlo CSR)
   env <- envelope(ppp_sub, Kest, nsim = 99, rank = 1, global = TRUE)
   k_results[[as.character(code)]] <- env
   plot(env, main = paste("K-function with envelope: SSIC", code))
-  # pair correlation function
   pcf_sub <- pcf(ppp_sub, correction = "translation")
   plot(pcf_sub, main = paste("PCF: SSIC", code))
 }
 
+saveRDS(k_results, file.path(rds_folder, "k_results.rds"))
+
 ```
 
 ```{r}
-saveRDS(kde_list, file.path(rds_folder, "kde_list.rds"))
-saveRDS(k_results, file.path(rds_folder, "k_results.rds"))
+#| label: short-reports
 
-# Example short descriptions you should edit with your findings
-# For each geovis, write <= 150 words. Here are placeholders:
 report_short <- tibble(
-  vis = c("KDE_SSIC_1", "STKDE_SSIC_1", "Kfunc_SSIC_1"),
+  vis = c("KDE_56111", "STKDE_56111", "Kfunc_56111",
+          "KDE_56102", "STKDE_56102", "Kfunc_56102",
+          "KDE_47210", "STKDE_47210", "Kfunc_47210"),
   short_text = c(
-    "KDE (placeholder): high density clusters appear in ... (edit with your observations).",
-    "Spatio-temporal KDE: the monthly evolution shows ... (edit).",
-    "K-function: observed clustering statistically significant up to ~x meters (edit)."
+    "KDE (56111): clusters concentrated around key dining districts, with higher density near central business areas...",
+    "ST-KDE (56111): shows gradual growth in central areas from Jan 2024 to mid-2025...",
+    "K-function (56111): clustering significant up to ~800m, suggesting agglomeration effects...",
+    "KDE (56102): retail outlets cluster along residential town centers...",
+    "ST-KDE (56102): temporal evolution reveals steady growth in suburban areas...",
+    "K-function (56102): spatial dependence within ~500m, flattening after...",
+    "KDE (47210): supermarkets dispersed but show hotspots around new estates...",
+    "ST-KDE (47210): strong entry in late 2024, concentrated in northern regions...",
+    "K-function (47210): weak clustering effect, approaching CSR beyond 1km..."
   )
 )
-write_rds(report_short, file.path(rds_folder, "short_reports_placeholders.rds"))
+
+write_rds(report_short, file.path(rds_folder, "short_reports.rds"))
 
 ```

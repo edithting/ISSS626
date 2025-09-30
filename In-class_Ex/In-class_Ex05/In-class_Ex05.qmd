@@ -1,0 +1,27 @@
+---
+title: "In-class Exercise 4"
+author: "Yiwen Ding"
+date: "September 20, 2025"
+date-modified: "last-modified"
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  freeze: true
+---
+
+```{r}
+pacman::p_load(sf, terra, spatstat, knitr,
+               tmap, rvest, tidyverse,
+               ggthemes, plotly, GWmodel)
+```
+
+### Plotting
+
+```{r}
+vm_Q <- hunan_GDPPC %>%
+  mutate(nb = st_contiguity(geometry),
+         vt = st_weights(nb.
+                         style = "w"),
+         .before  = 1)
+```
