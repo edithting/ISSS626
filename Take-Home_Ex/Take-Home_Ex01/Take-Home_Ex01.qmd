@@ -2,6 +2,12 @@
 title: "Take-Home_Ex01"
 aurthor: "Yiwen Ding"
 modified: "Sept 24, 2025"
+
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  freeze: true
 ---
 
 This is a Quarto website.

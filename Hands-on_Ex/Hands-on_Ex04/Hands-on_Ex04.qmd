@@ -3,7 +3,7 @@ title: "Hands-on Exercise 4"
 author: "Yiwen Ding"
 
 execute: 
-  eval: true
+  eval: false
   echo: true
   warning: false
   freeze: true
