@@ -1,0 +1,15 @@
+{
+  "hash": "bba1c3305b6cfc2b246db81fa74bfe88",
+  "result": {
+    "engine": "knitr",
+    "markdown": "---\ntitle: \"In-class Exercise 6\"\nauthor: \"Yiwen Ding\"\ndate: \"Octorber 4, 2025\"\ndate-modified: \"last-modified\"\nexecute: \n  eval: false\n  echo: true\n  warning: false\n  freeze: true\n---\n\n\n::: {.cell}\n\n```{.r .cell-code}\npacman::p_load(sf, terra, spatstat, knitr,\n               tmap, rvest, tidyverse,\n               plotly, sfdep)\n```\n:::\n\n\n### Importing Data\n\n\n::: {.cell}\n\n```{.r .cell-code}\nmpsz <- read_rds(\"data/rds/mpsz_sf.rds\")\n\nBusStop = st_read(dsn = \"data/geospatial/\",\n                  layer = \"BusStop\") %>%\n  st_transform(crs = 3414)\n  \nodbus <- read_csv(\"data/aspatial/origin_destination_bus_202508.csv\")\n```\n:::\n\n\n### Extracting Bus Stops within SG\n\n\n::: {.cell}\n\n```{.r .cell-code}\ntm_shape(mpsz) +\n  tm_polygons() + \n\ntm_shape(BusStop) +\n  tm_dots() \n```\n:::\n\n\n\n::: {.cell}\n\n```{.r .cell-code}\nst_crs(BusStop)\nst_crs(mpsz)\n```\n:::\n\n\n\n::: {.cell}\n\n```{.r .cell-code}\nBusStop = st_read(dsn = \"data/geospatial/\",\n                  layer = \"BusStop\") %>%\n  st_transform(crs = 3414)\n```\n:::\n\n\n\n::: {.cell}\n\n```{.r .cell-code}\nBusStop <- st_transform(BusStop, st_crs(mpsz))\n\nBusStop_in_SG <- st_join(\n  BusStop, mpsz,\n  join = st_within,\n  left = FALSE\n)\n```\n:::\n\n\n\n::: {.cell}\n\n```{.r .cell-code}\ntm_shape(mpsz) +\n  tm_polygons() + \n\ntm_shape(BusStop_in_SG) +\n  tm_dots()\n```\n:::\n\n\n### Deriving Analytical Hexagon\n\n\n::: {.cell}\n\n```{.r .cell-code}\nhexagon <- st_make_grid(mpsz,\n                        cellsize = 700,\n                        what = \"polygon\",\n                        square = FALSE) %>%\n  st_sf()\n```\n:::\n\n\n### Filtering Hexagons with bus stops\n\n\n::: {.cell}\n\n```{.r .cell-code}\nhexagon$n_collisions = \n  lengths(st_intersects(\n    hexagon, BusStop_in_SG))\n\nhexagon <- filter(hexagon, n_collisions > 0)\n```\n:::\n\n\n### Assigning ids to each hexagon\n\n\n::: {.cell}\n\n```{.r .cell-code}\nhexagon <- hexagon %>%\n  select( -n_collisions)\n\nhexagon$HEX_ID <- sprintf(\n  \"H%04d\", seq_len(nrow(hexagon))) %>%\n  as.factor()\n\nkable(head(hexagon))\n```\n:::\n\n\n## Preparing Trip Generation Data\n\n### Cleaning data\n\n\n::: {.cell}\n\n```{.r .cell-code}\ntrips <- odbus %>%\n  select(c(ORIGIN_PT_CODE, DAY_TYPE, TIME_PER_HOUR, TOTAL_TRIPS)) %>%\n  rename(BUS_STOP_N = ORIGIN_PT_CODE) %>%\n  rename(HOUR_OF_DAY = TIME_PER_HOUR) %>%\n  rename(TRPS = TOTAL_TRIPS) \ntrips$BUS_STOP_N <- as.factor(trips$BUS_STOP_N)\nkable(head(trips))\n```\n:::\n\n\n\n::: {.cell}\n\n```{.r .cell-code}\nbs_hex <- st_intersection(\n  BusStop, hexagon) %>%\n  st_drop_geometry() %>%\n  select(c(BUS_STOP_N, HEX_ID))\nkable(head(bs_hex))\n```\n:::\n\n\n\n::: {.cell}\n\n```{.r .cell-code}\ntrips <- inner_join(trips, bs_hex)\nkable(head(trips))\n```\n:::\n\n",
+    "supporting": [],
+    "filters": [
+      "rmarkdown/pagebreak.lua"
+    ],
+    "includes": {},
+    "engineDependencies": {},
+    "preserve": {},
+    "postProcess": true
+  }
+}
