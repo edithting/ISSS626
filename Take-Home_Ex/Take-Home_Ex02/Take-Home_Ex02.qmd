@@ -1,0 +1,419 @@
+---
+title: "Take-Home Exercise 2"
+author: "Yiwen Ding"
+date: "Octorber 23, 2025"
+date-modified: "last-modified"
+execute: 
+  eval: false
+  echo: true
+  warning: false
+  freeze: true
+---
+
+```{r}
+# ---------------------------
+# 0. Setup
+# ---------------------------
+# install pacman if missing
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  sf, terra, tidyverse, tmap, spdep, Kendall,
+  knitr, readr, lubridate
+)
+
+# ensure tmap plotting mode
+tmap_mode("plot")
+
+# create outputs dir
+if (!dir.exists("outputs")) dir.create("outputs")
+```
+
+```{r}
+# ---------------------------
+# 1. Read data
+# ---------------------------
+mpsz <- read_rds("data/rds/mpsz_sf.rds")  # study area polygons
+BusStop <- st_read(dsn = "data/geospatial/", layer = "BusStop", quiet = TRUE)
+odbus <- read_csv("data/aspatial/origin_destination_bus_202508.csv", show_col_types = FALSE)
+
+# examine CRSes; convert everything to Singapore CRS (EPSG:3414) for distance calculations
+target_crs <- 3414
+mpsz <- st_transform(mpsz, crs = target_crs)
+BusStop <- st_transform(BusStop, crs = target_crs)
+```
+
+```{r}
+# ---------------------------
+# 2. Derive hexagon grid (apothem = 375 m)
+# ---------------------------
+hex_cells <- st_make_grid(mpsz,
+                          cellsize = 750,   # 2 * 375 (apothem -> edge-to-edge)
+                          what = "polygons",
+                          square = FALSE) %>%
+  st_sf() %>%
+  st_set_crs(st_crs(mpsz))
+
+# clip hexagons to study area union (no sea)
+hex_cells <- st_intersection(hex_cells, st_union(mpsz))
+
+# assign HEX_ID
+hex_cells$HEX_ID <- sprintf("H%04d", seq_len(nrow(hex_cells))) %>% as.factor()
+
+# save intermediate hexagon for inspection
+st_write(hex_cells, "outputs/hexagon_grid_375m.geojson", delete_dsn = TRUE, quiet = TRUE)
+```
+
+```{r}
+# ---------------------------
+# 3. Filter bus stops inside study area and join to hexagon
+# ---------------------------
+possible_code_cols <- c("BUS_STOP_N", "BUS_STOP_CODE", "bus_stop_code", "BUSSTOPCODE", "busstopcode", "BusStopCode")
+code_col <- intersect(possible_code_cols, names(BusStop)) %>% first()
+if (is.null(code_col) || length(code_col) == 0) {
+  # fallback: try common field "bus_stop_code" or "busstopcode" else use first non-geometry column
+  code_col <- names(BusStop)[1]
+  message("Warning: could not find standard bus stop code column; using ", code_col)
+}
+
+# rename to BUS_STOP_N for convenience
+BusStop <- BusStop %>% rename(BUS_STOP_N = all_of(code_col))
+
+BusStop_in <- st_join(BusStop, mpsz, join = st_within, left = FALSE)
+BusStop_in <- st_transform(BusStop_in, st_crs(hex_cells))
+
+# intersect bus stops with hex cells to attach HEX_ID
+bs_hex <- st_intersection(st_geometry(BusStop_in), st_geometry(hex_cells)) # geometry-only intersection
+# better: use spatial join to retain attributes
+bs_hex <- st_join(BusStop_in, hex_cells %>% select(HEX_ID), join = st_within, left = FALSE)
+bs_hex <- bs_hex %>% st_drop_geometry() %>% distinct(BUS_STOP_N, HEX_ID)
+
+# ensure consistent types
+bs_hex$BUS_STOP_N <- as.character(bs_hex$BUS_STOP_N)
+```
+
+```{r}
+# ---------------------------
+# 4. Prepare trips data and map to hex
+# ---------------------------
+expected_cols <- c("ORIGIN_PT_CODE", "DAY_TYPE", "TIME_PER_HOUR", "TOTAL_TRIPS")
+if (!all(expected_cols %in% names(odbus))) {
+  stop("odbus missing expected columns. Found: ", paste(names(odbus), collapse = ", "))
+}
+
+trips <- odbus %>%
+  select(ORIGIN_PT_CODE, DAY_TYPE, TIME_PER_HOUR, TOTAL_TRIPS) %>%
+  rename(BUS_STOP_N = ORIGIN_PT_CODE,
+         HOUR_RAW = TIME_PER_HOUR,
+         DAY_TYPE = DAY_TYPE,
+         TRPS = TOTAL_TRIPS) %>%
+  mutate(BUS_STOP_N = as.character(BUS_STOP_N))
+
+parse_hour <- function(x) {
+  # handle numeric
+  if (is.numeric(x)) return(as.integer(x))
+  # handle character like "06:00" or "6"
+  x_chr <- as.character(x)
+  # try to parse first two digits before ":" or non-digit
+  res <- suppressWarnings(as.integer(substr(x_chr, 1, 2)))
+  if (!is.na(res)) return(res)
+  # fallback: parse digits
+  digits <- stringr::str_extract(x_chr, "\\d{1,2}")
+  as.integer(digits)
+}
+trips <- trips %>% mutate(HOUR = parse_hour(HOUR_RAW))
+
+# join trips to hex via bs_hex
+trips <- inner_join(trips, bs_hex, by = "BUS_STOP_N")
+```
+
+```{r}
+# ---------------------------
+# 5. Define periods and aggregate trips to hexagon level
+# ---------------------------
+# Standardize DAY_TYPE values to uppercase to match possibilities
+trips <- trips %>% mutate(DAY_TYPE_UP = toupper(DAY_TYPE))
+
+trips <- trips %>%
+  mutate(
+    PERIOD = case_when(
+      DAY_TYPE_UP %in% c("WEEKDAY", "WEEKDAY/PH", "WEEKDAY/PH?") & HOUR >= 6  & HOUR <= 8  ~ "WK_MORNING",
+      DAY_TYPE_UP %in% c("WEEKDAY", "WEEKDAY/PH", "WEEKDAY/PH?") & HOUR >= 17 & HOUR <= 19 ~ "WK_AFTERNOON",
+      DAY_TYPE_UP %in% c("WEEKEND", "WEEKEND/HOL", "SAT/SUN", "HOLIDAY", "PH") & HOUR >= 11 & HOUR <= 19 ~ "WKND_HOL",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(PERIOD))
+
+# aggregate: trips per HEX_ID x PERIOD
+hex_period_sum <- trips %>%
+  group_by(HEX_ID, PERIOD) %>%
+  summarise(TRPS = sum(as.numeric(TRPS), na.rm = TRUE), .groups = "drop")
+
+# pivot to wide format (one column per period)
+hex_period_wide <- hex_period_sum %>%
+  pivot_wider(names_from = PERIOD, values_from = TRPS, values_fill = 0)
+
+# join aggregated trips back to hex_cells
+hex_cells <- left_join(hex_cells, hex_period_wide, by = "HEX_ID")
+
+# ensure columns exist
+for (col in c("WK_MORNING", "WK_AFTERNOON", "WKND_HOL")) {
+  if (!(col %in% names(hex_cells))) hex_cells[[col]] <- 0
+  hex_cells[[col]][is.na(hex_cells[[col]])] <- 0
+}
+
+# Save aggregated table
+write_csv(st_drop_geometry(hex_cells) %>% select(HEX_ID, WK_MORNING, WK_AFTERNOON, WKND_HOL),
+          "outputs/hex_trips_by_period.csv")
+```
+
+```{r}
+# ---------------------------
+# 6. Geovisualisation: maps of passenger trips by hexagon for each period
+# ---------------------------
+breaks_fun <- function(x) {
+  # compute pretty breaks including 0
+  x_nonzero <- x[x > 0]
+  if (length(x_nonzero) == 0) return(c(0))
+  br <- classInt::classIntervals(x_nonzero, n = 5, style = "jenks")$brks
+  unique(c(0, br))
+}
+
+# Weekday morning map
+b_wm <- breaks_fun(hex_cells$WK_MORNING)
+map_wm <- tm_shape(hex_cells) +
+  tm_polygons("WK_MORNING", style = "fixed", breaks = b_wm,
+              title = "Trips (WK Morning)") +
+  tm_shape(mpsz) + tm_borders(alpha = 0.4) +
+  tm_layout(main.title = "Passenger trips by origin — Weekday Morning (06:00-08:59)")
+tmap_save(map_wm, "outputs/map_trips_wk_morning.png", width = 1200, height = 900)
+
+# Weekday afternoon map
+b_wa <- breaks_fun(hex_cells$WK_AFTERNOON)
+map_wa <- tm_shape(hex_cells) +
+  tm_polygons("WK_AFTERNOON", style = "fixed", breaks = b_wa,
+              title = "Trips (WK Afternoon)") +
+  tm_shape(mpsz) + tm_borders(alpha = 0.4) +
+  tm_layout(main.title = "Passenger trips by origin — Weekday Afternoon (17:00-19:59)")
+tmap_save(map_wa, "outputs/map_trips_wk_afternoon.png", width = 1200, height = 900)
+
+# Weekend/holiday map
+b_wh <- breaks_fun(hex_cells$WKND_HOL)
+map_wh <- tm_shape(hex_cells) +
+  tm_polygons("WKND_HOL", style = "fixed", breaks = b_wh,
+              title = "Trips (Weekend/Holiday)") +
+  tm_shape(mpsz) + tm_borders(alpha = 0.4) +
+  tm_layout(main.title = "Passenger trips by origin — Weekend/Holiday (11:00-19:59)")
+tmap_save(map_wh, "outputs/map_trips_wknd_hol.png", width = 1200, height = 900)
+```
+
+```{r}
+# ---------------------------
+# 7. Local Measures of Spatial Autocorrelation (LMSA)
+# ---------------------------
+# Ensure validity
+hex_cells <- st_make_valid(hex_cells)
+
+nb <- poly2nb(hex_cells, queen = FALSE)
+# handle isolated polygons (no neighbors)
+no_nb <- which(card(nb) == 0)
+if (length(no_nb) > 0) {
+  cent <- st_centroid(st_geometry(hex_cells))
+  for (i in no_nb) {
+    d <- as.numeric(st_distance(cent[i], cent))
+    d[i] <- Inf
+    nb[[i]] <- which.min(d)
+  }
+}
+listw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+# helper to run localmoran and localG robustly
+safe_localmoran <- function(x, lw) {
+  lm <- localmoran(x, lw, zero.policy = TRUE)
+  out <- tibble(I = lm[,1], Z = if (ncol(lm) >= 4) lm[,4] else NA_real_,
+                P = if (ncol(lm) >= 5) lm[,5] else NA_real_)
+  out
+}
+safe_localG <- function(x, lw) {
+  gz <- localG(x, lw, zero.policy = TRUE)
+  z <- as.numeric(gz)
+  p <- 2 * pnorm(-abs(z))
+  tibble(Gz = z, Gp = p)
+}
+
+# compute for each period
+lm_wm <- safe_localmoran(hex_cells$WK_MORNING, listw)
+lm_wa <- safe_localmoran(hex_cells$WK_AFTERNOON, listw)
+lm_wk <- safe_localmoran(hex_cells$WKND_HOL, listw)
+
+gi_wm <- safe_localG(hex_cells$WK_MORNING, listw)
+gi_wa <- safe_localG(hex_cells$WK_AFTERNOON, listw)
+gi_wk <- safe_localG(hex_cells$WKND_HOL, listw)
+
+# attach to hex_cells
+hex_cells <- hex_cells %>%
+  mutate(
+    I_WM = lm_wm$I, I_WM_p = lm_wm$P,
+    I_WA = lm_wa$I, I_WA_p = lm_wa$P,
+    I_WK = lm_wk$I, I_WK_p = lm_wk$P,
+    Gi_WM_z = gi_wm$Gz, Gi_WM_p = gi_wm$Gp,
+    Gi_WA_z = gi_wa$Gz, Gi_WA_p = gi_wa$Gp,
+    Gi_WK_z = gi_wk$Gz, Gi_WK_p = gi_wk$Gp
+  )
+
+# Save with LMSA stats
+st_write(hex_cells, "outputs/hex_lmsa_full.geojson", delete_dsn = TRUE, quiet = TRUE)
+
+sig_threshold <- 0.05
+
+# helper to produce Gi* significance map for a period
+plot_gi_sig <- function(hex_sf, zcol, pcol, title, fname) {
+  sig_hex <- filter(hex_sf, !!sym(pcol) < sig_threshold)
+  # if no significant features, produce empty message
+  if (nrow(sig_hex) == 0) {
+    message("No significant Gi* for ", title)
+    return(NULL)
+  }
+  zvals <- sig_hex[[zcol]]
+  brks <- c(-Inf, -2.58, -1.96, 0, 1.96, 2.58, Inf)  # conventional z breaks
+  m <- tm_shape(hex_sf) +
+    tm_polygons(col = NA, border.col = "grey90") +
+    tm_shape(sig_hex) +
+    tm_polygons(col = zcol, style = "fixed", breaks = brks, title = paste0("Gi* z (sig)"),
+                palette = "-RdYlBu") +
+    tm_shape(mpsz) + tm_borders(alpha = 0.4) +
+    tm_layout(main.title = title)
+  tmap_save(m, fname, width = 1200, height = 900)
+  invisible(m)
+}
+
+plot_gi_sig(hex_cells, "Gi_WM_z", "Gi_WM_p", "Getis-Ord Gi* (Weekday Morning) — significant (p<0.05)", "outputs/Gi_sig_wk_morning.png")
+plot_gi_sig(hex_cells, "Gi_WA_z", "Gi_WA_p", "Getis-Ord Gi* (Weekday Afternoon) — significant (p<0.05)", "outputs/Gi_sig_wk_afternoon.png")
+plot_gi_sig(hex_cells, "Gi_WK_z", "Gi_WK_p", "Getis-Ord Gi* (Weekend/Holiday) — significant (p<0.05)", "outputs/Gi_sig_wknd_hol.png")
+
+# Also produce Local Moran (I) significance maps if you want (similar approach)
+plot_I_sig <- function(hex_sf, icol, pcol, title, fname) {
+  sig_hex <- filter(hex_sf, !!sym(pcol) < sig_threshold)
+  if (nrow(sig_hex) == 0) {
+    message("No significant Local Moran for ", title)
+    return(NULL)
+  }
+  m <- tm_shape(hex_sf) +
+    tm_polygons(col = NA, border.col = "grey90") +
+    tm_shape(sig_hex) +
+    tm_polygons(col = icol, style = "quantile", n = 5, title = paste0("Local Moran I (sig)")) +
+    tm_shape(mpsz) + tm_borders(alpha = 0.4) +
+    tm_layout(main.title = title)
+  tmap_save(m, fname, width = 1200, height = 900)
+  invisible(m)
+}
+
+plot_I_sig(hex_cells, "I_WM", "I_WM_p", "Local Moran's I (Weekday Morning) — significant (p<0.05)", "outputs/LocalMoran_sig_wk_morning.png")
+plot_I_sig(hex_cells, "I_WA", "I_WA_p", "Local Moran's I (Weekday Afternoon) — significant (p<0.05)", "outputs/LocalMoran_sig_wk_afternoon.png")
+plot_I_sig(hex_cells, "I_WK", "I_WK_p", "Local Moran's I (Weekend/Holiday) — significant (p<0.05)", "outputs/LocalMoran_sig_wknd_hol.png")
+```
+
+```{r}
+# ---------------------------
+# 8. Emerging Hot Spot Analysis (EHSA) — simplified approach
+# ---------------------------
+# prepare matrix of Gi* z-scores in chronological order: morning -> afternoon -> weekend
+gi_mat <- hex_cells %>%
+  st_drop_geometry() %>%
+  transmute(HEX_ID, v1 = Gi_WM_z, v2 = Gi_WA_z, v3 = Gi_WK_z)
+
+# Mann-Kendall requires >= 3 observations; we have 3 time slices
+mk_apply <- function(x) {
+  # x is numeric vector length 3
+  if (all(is.na(x))) return(list(tau = NA_real_, p = NA_real_))
+  res <- tryCatch(MannKendall(x), error = function(e) NULL)
+  if (is.null(res)) return(list(tau = NA_real_, p = NA_real_))
+  list(tau = as.numeric(res$tau), p = as.numeric(res$sl))
+}
+
+mk_out <- t(apply(as.matrix(gi_mat[, c("v1","v2","v3")]), 1, function(r) {
+  out <- mk_apply(r)
+  c(tau = out$tau, p = out$p)
+}))
+mk_df <- tibble(HEX_ID = gi_mat$HEX_ID, mk_tau = mk_out[, "tau"], mk_p = mk_out[, "p"])
+
+# attach to hex_cells
+hex_cells <- left_join(hex_cells, mk_df, by = "HEX_ID")
+
+# define significance for Gi* per period
+hex_cells <- hex_cells %>%
+  mutate(
+    pos_sig = (Gi_WM_z > 0 & Gi_WM_p < 0.05) | (Gi_WA_z > 0 & Gi_WA_p < 0.05) | (Gi_WK_z > 0 & Gi_WK_p < 0.05),
+    neg_sig = (Gi_WM_z < 0 & Gi_WM_p < 0.05) | (Gi_WA_z < 0 & Gi_WA_p < 0.05) | (Gi_WK_z < 0 & Gi_WK_p < 0.05),
+    EHSA = case_when(
+      pos_sig & mk_tau > 0 & mk_p < 0.05 ~ "Intensifying_Hotspot",
+      pos_sig & mk_tau < 0 & mk_p < 0.05 ~ "Diminishing_Hotspot",
+      pos_sig & mk_p >= 0.05 ~ "Sporadic_Hotspot",
+      neg_sig & mk_tau < 0 & mk_p < 0.05 ~ "Intensifying_Coldspot",
+      neg_sig & mk_tau > 0 & mk_p < 0.05 ~ "Diminishing_Coldspot",
+      neg_sig & mk_p >= 0.05 ~ "Sporadic_Coldspot",
+      TRUE ~ "Not_Significant"
+    )
+  )
+
+# Save EHSA results
+st_write(hex_cells, "outputs/hex_ehsa.geojson", delete_dsn = TRUE, quiet = TRUE)
+
+# Map EHSA: show only significant categories (i.e., not "Not_Significant")
+ehsa_sig <- filter(hex_cells, EHSA != "Not_Significant")
+if (nrow(ehsa_sig) > 0) {
+  # prepare a color palette mapping for categories
+  cats <- sort(unique(ehsa_sig$EHSA))
+  # make a friendly palette
+  pal <- c(
+    "Intensifying_Hotspot" = "#d73027",
+    "Diminishing_Hotspot" = "#fc8d59",
+    "Sporadic_Hotspot" = "#fdd49e",
+    "Intensifying_Coldspot" = "#4575b4",
+    "Diminishing_Coldspot" = "#74add1",
+    "Sporadic_Coldspot" = "#c6dbef"
+  )
+  pal_used <- pal[names(pal) %in% cats]
+  ehsa_map <- tm_shape(hex_cells) +
+    tm_polygons(col = NA, border.col = "grey90") +
+    tm_shape(ehsa_sig) +
+    tm_polygons("EHSA", palette = pal_used, title = "EHSA (sig only)") +
+    tm_shape(mpsz) + tm_borders(alpha = 0.4) +
+    tm_layout(main.title = "Simplified EHSA categories (significant only)")
+  tmap_save(ehsa_map, "outputs/ehsa_sig_map.png", width = 1200, height = 900)
+} else {
+  message("No significant EHSA categories found (no hexagon labelled significant).")
+}
+```
+
+```{r}
+# ---------------------------
+# 9. Export tables for reporting
+# ---------------------------
+# export CSV with HEX_ID, trips, Gi*/I stats, MK results, EHSA
+export_tbl <- hex_cells %>%
+  st_drop_geometry() %>%
+  select(HEX_ID,
+         WK_MORNING, WK_AFTERNOON, WKND_HOL,
+         I_WM, I_WM_p, I_WA, I_WA_p, I_WK, I_WK_p,
+         Gi_WM_z, Gi_WM_p, Gi_WA_z, Gi_WA_p, Gi_WK_z, Gi_WK_p,
+         mk_tau, mk_p, EHSA)
+
+write_csv(export_tbl, "outputs/hex_analysis_summary.csv")
+```
+
+```{r}
+# ---------------------------
+# 10. Final messages
+# ---------------------------
+message("All done. Outputs saved to outputs/ directory:")
+message(" - hexagon_grid_375m.geojson")
+message(" - hex_trips_by_period.csv")
+message(" - hex_lmsa_full.geojson")
+message(" - hex_ehsa.geojson")
+message(" - map pngs: map_trips_*.png, Gi_sig_*.png, LocalMoran_sig_*.png, ehsa_sig_map.png")
+message(" - hex_analysis_summary.csv")
+
+
+```
