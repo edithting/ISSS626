@@ -1,0 +1,277 @@
+---
+title: "Hands-on Exercise 8"
+author: "Yiwen Ding"
+
+execute: 
+  eval: false
+  echo: true
+  warning: false
+  freeze: true
+---
+
+```{r}
+pacman::p_load(sf, spdep, GWmodel, SpatialML, 
+               tmap, rsample, Metrics, tidyverse)
+```
+
+### Preparing Data
+
+```{r}
+mdata <- read_rds("data/rawdata/mdata.rds")
+```
+
+```{r}
+set.seed(1234)
+resale_split <- initial_split(mdata, 
+                              prop = 6.5/10,)
+train_data <- training(resale_split)
+test_data <- testing(resale_split)
+```
+
+```{r}
+write_rds(train_data, "data/model/train_data.rds")
+write_rds(test_data, "data/model/test_data.rds")
+```
+
+### Computing Correlation Matrix
+
+```{r}
+mdata_nogeo <- mdata %>%
+  st_drop_geometry()
+corrplot::corrplot(cor(mdata_nogeo[, 2:17]), 
+                   diag = FALSE, 
+                   order = "AOE",
+                   tl.pos = "td", 
+                   tl.cex = 0.5, 
+                   method = "number", 
+                   type = "upper")
+```
+
+### Retriving the Stored Data
+
+```{r}
+train_data <- read_rds("data/model/train_data.rds")
+test_data <- read_rds("data/model/test_data.rds")
+```
+
+### Building a non-spatial multiple linear regression
+
+```{r}
+price_mlr <- lm(resale_price ~ floor_area_sqm +
+                  storey_order + remaining_lease_mths +
+                  PROX_CBD + PROX_ELDERLYCARE + PROX_HAWKER +
+                  PROX_MRT + PROX_PARK + PROX_MALL + 
+                  PROX_SUPERMARKET + WITHIN_350M_KINDERGARTEN +
+                  WITHIN_350M_CHILDCARE + WITHIN_350M_BUS +
+                  WITHIN_1KM_PRISCH,
+                data=train_data)
+summary(price_mlr)
+```
+
+```{r}
+write_rds(price_mlr, "data/model/price_mlr.rds" ) 
+```
+
+### gwr predictive method
+
+```{r}
+gbw_adaptive <- bw.gwr(
+  formula = resale_price ~ floor_area_sqm +
+    storey_order + remaining_lease_mths +
+    PROX_CBD + PROX_ELDERLYCARE + PROX_HAWKER +
+    PROX_MRT + PROX_PARK + PROX_MALL + 
+    PROX_SUPERMARKET + WITHIN_350M_KINDERGARTEN +
+    WITHIN_350M_CHILDCARE + WITHIN_350M_BUS +
+    WITHIN_1KM_PRISCH,
+  data=train_data,
+  approach="CV",
+  kernel="gaussian",
+  adaptive=TRUE,
+  longlat=FALSE)
+
+write_rds(bw_adaptive, "data/model/bw_adaptive.rds")
+```
+
+```{r}
+bw_adaptive <- read_rds(
+  "data/model/bw_adaptive.rds")
+```
+
+```{r}
+gwr_adaptive <- gwr.basic(
+  formula = resale_price ~ floor_area_sqm +
+    storey_order + remaining_lease_mths + 
+    PROX_CBD + PROX_ELDERLYCARE + 
+    PROX_HAWKER + PROX_MRT + PROX_PARK + 
+    PROX_MALL + PROX_SUPERMARKET +
+    WITHIN_350M_KINDERGARTEN +
+    WITHIN_350M_CHILDCARE + 
+    WITHIN_350M_BUS + WITHIN_1KM_PRISCH,
+  data=train_data,
+  bw=bw_adaptive, 
+  kernel = 'gaussian', 
+  adaptive=TRUE,
+  longlat = FALSE)
+
+write_rds(gwr_adaptive, 
+          "data/model/gwr_adaptive.rds")
+```
+
+```{r}
+gwr_adaptive <- readRDS("data/model/gwr_adaptive.rds")
+
+gwr_adaptive
+```
+
+```{r}
+gwr_bw_test_adaptive <- bw.gwr(
+  formula = resale_price ~ floor_area_sqm +
+    storey_order + remaining_lease_mths +
+    PROX_CBD + PROX_ELDERLYCARE + PROX_HAWKER +
+    PROX_MRT + PROX_PARK + PROX_MALL + 
+    PROX_SUPERMARKET + WITHIN_350M_KINDERGARTEN +
+    WITHIN_350M_CHILDCARE + WITHIN_350M_BUS +
+    WITHIN_1KM_PRISCH,
+  data=test_data,
+  approach="CV",
+  kernel="gaussian",
+  adaptive=TRUE,
+  longlat=FALSE)
+
+write_rds(gwr_bw_test_adaptive, 
+          "data/model/gwr_bw_test_adaptive.rds")
+```
+
+```{r}
+gwr_pred <- gwr.predict(
+  formula = resale_price ~ floor_area_sqm + 
+    storey_order + remaining_lease_mths + 
+    PROX_CBD + PROX_ELDERLYCARE + PROX_HAWKER + 
+    PROX_MRT + PROX_PARK + PROX_MALL + 
+    PROX_SUPERMARKET + WITHIN_350M_KINDERGARTEN +
+    WITHIN_350M_CHILDCARE + WITHIN_350M_BUS + 
+    WITHIN_1KM_PRISCH, 
+  data=train_data, 
+  predictdata = test_data, 
+  bw=40, 
+  kernel = 'gaussian', 
+  adaptive=TRUE, 
+  longlat = FALSE)
+
+write_rds(gwr_pred, 
+          "data/model/gwr_pred.rds")
+```
+
+### Calibrating Random Forest Model
+
+```{r}
+coords <- st_coordinates(mdata)
+coords_train <- st_coordinates(train_data)
+coords_test <- st_coordinates(test_data)
+```
+
+```{r}
+coords_train <- write_rds(
+  coords_train, 
+  "data/model/coords_train.rds" )
+coords_test <- write_rds(
+  coords_test, 
+  "data/model/coords_test.rds" )
+```
+
+```{r}
+train_data_nogeom <- train_data %>% 
+  st_drop_geometry()
+
+test_data_nogeom <- test_data %>% 
+  st_drop_geometry()
+```
+
+```{r}
+set.seed(1234)
+rf <- ranger(
+  formula = resale_price ~ floor_area_sqm +
+    storey_order + remaining_lease_mths + 
+    PROX_CBD + PROX_ELDERLYCARE + 
+    PROX_HAWKER + PROX_MRT + PROX_PARK + 
+    PROX_MALL + PROX_SUPERMARKET +
+    WITHIN_350M_KINDERGARTEN + 
+    WITHIN_350M_CHILDCARE + 
+    WITHIN_350M_BUS +  
+    WITHIN_1KM_PRISCH,
+  data=train_data_nogeom)
+rf
+```
+
+```{r}
+write_rds(rf, "data/model/rf.rds")
+```
+
+### Calibrating Geographical Weighted Random Forest Model
+
+```{r}
+set.seed(1234)
+gwRF_adaptive <- grf(
+  formula = resale_price ~ floor_area_sqm +
+    storey_order + remaining_lease_mths + 
+    PROX_CBD + PROX_ELDERLYCARE + 
+    PROX_HAWKER + PROX_MRT + PROX_PARK + 
+    PROX_MALL + PROX_SUPERMARKET +
+    WITHIN_350M_KINDERGARTEN +
+    WITHIN_350M_CHILDCARE + 
+    WITHIN_350M_BUS + WITHIN_1KM_PRISCH,
+  dframe=train_data_nogeom, 
+  bw=40,
+  kernel="adaptive",
+  coords=coords_train)
+
+write_rds(gwRF_adaptive, "data/model/gwRF_adaptive.rds")
+```
+
+```{r}
+gwRF_adaptive <- read_rds("data/model/gwRF_adaptive.rds")
+```
+
+```{r}
+test_data_nogeom <- cbind(
+  test_data, coords_test) %>%
+  st_drop_geometry()
+```
+
+```{r}
+gwRF_pred <- predict.grf(gwRF_adaptive, 
+                           test_data_nogeom, 
+                           x.var.name="X",
+                           y.var.name="Y", 
+                           local.w=1,
+                           global.w=0)
+
+GRF_pred <- write_rds(gwRF_pred, "data/model/GRF_pred.rds")
+```
+
+```{r}
+GRF_pred <- read_rds(
+  "chap14/data/model/GRF_pred.rds")
+GRF_pred_df <- as.data.frame(GRF_pred)
+```
+
+```{r}
+test_data_p <- cbind(
+  test_data, GRF_pred_df) %>%
+  select(resale_price, GRF_pred)
+
+write_rds(test_data_p, 
+          "data/model/test_data_p.rds")
+```
+
+```{r}
+rmse(test_data_p$resale_price, 
+     test_data_p$GRF_pred)
+```
+
+```{r}
+ggplot(data = test_data_p,
+       aes(x = GRF_pred,
+           y = resale_price)) +
+  geom_point()
+```

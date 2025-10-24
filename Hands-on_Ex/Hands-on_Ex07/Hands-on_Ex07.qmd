@@ -3,7 +3,7 @@ title: "Hands-on Exercise 7"
 author: "Yiwen Ding"
 
 execute: 
-  eval: true
+  eval: false
   echo: true
   warning: false
   freeze: true
@@ -15,7 +15,9 @@ pacman::p_load(olsrr, corrplot, ggpubr,
                tidyverse, gtsummary,
                performance, RColorBrewer)
 ```
+
 ### Geospatial Data Wrangling
+
 ```{r}
 mpsz = st_read(dsn = "data/geospatial", 
                layer = "MP14_SUBZONE_WEB_PL")
@@ -30,6 +32,7 @@ st_bbox(mpsz_svy21)
 ```
 
 ### Aspatial Data Wrangling
+
 ```{r}
 condo_resale = read_csv(
   "data/aspatial/Condo_resale_2015.csv")
@@ -55,6 +58,7 @@ head(condo_resale.sf)
 ```
 
 ### Exploratory Data Analysis
+
 ```{r}
 ggplot(data=condo_resale.sf, 
        aes(x=`SELLING_PRICE`)) +
@@ -160,6 +164,7 @@ tmap_mode("plot")
 ```
 
 ### Hedonic Pricing Modelling in R
+
 ```{r}
 condo.slr <- lm(formula=SELLING_PRICE ~ AREA_SQM, 
                 data = condo_resale.sf)
@@ -271,7 +276,6 @@ tm_shape(condo_resale.sf) +
   tm_view(set_zoom_limits = c(11,14))
 ```
 
-
 ```{r}
 tmap_mode("plot")
 
@@ -294,7 +298,7 @@ global_moran_perm(
 ```
 
 ### Building Hedonic Pricing Models using GWmodel
+
 ```{r}
 
 ```
-
