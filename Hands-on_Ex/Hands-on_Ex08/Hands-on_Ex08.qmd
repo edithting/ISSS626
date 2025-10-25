@@ -75,7 +75,7 @@ write_rds(price_mlr, "data/model/price_mlr.rds" )
 ### gwr predictive method
 
 ```{r}
-gbw_adaptive <- bw.gwr(
+bw_adaptive <- bw.gwr(
   formula = resale_price ~ floor_area_sqm +
     storey_order + remaining_lease_mths +
     PROX_CBD + PROX_ELDERLYCARE + PROX_HAWKER +
