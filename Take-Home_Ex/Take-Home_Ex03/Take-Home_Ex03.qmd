@@ -1,0 +1,138 @@
+---
+title: "Take-Home Exercise 3"
+author: "Yiwen Ding"
+date: "November 12, 2025"
+date-modified: "last-modified"
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  freeze: true
+---
+
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(randomForest)
+
+
+#-------------------------------------------------
+# 1. Load Data
+#-------------------------------------------------
+df <- read_csv("data/aspatial/HDBresale.csv")
+
+# Ensure month is parsed
+df <- df %>%
+  mutate(month = ym(month))
+```
+
+
+```{r}
+#-------------------------------------------------
+# 2. Filter training data (Jul 2024 – Jun 2025)
+#-------------------------------------------------
+train_df <- df %>%
+  filter(month >= ym("2024-07") & month <= ym("2025-06")) %>%
+  filter(!is.na(resale_price))  # ensure no missing price
+```
+
+
+```{r}
+#-------------------------------------------------
+# 3. Minimal cleaning (robust — no assumptions about LAT/LONG)
+#-------------------------------------------------
+train_df <- train_df %>%
+  mutate(
+    town = factor(town),
+    flat_type = factor(flat_type),
+    flat_model = factor(flat_model),
+    floor_area_sqm = as.numeric(floor_area_sqm),
+    # extract lower range of 'storey_range', e.g., "05 TO 08" → 5
+    storey_start = as.numeric(str_extract(storey_range, "^\\d+")),
+    lease_years_left = 99 - (year(month) - year(lease_commence_date))
+  )
+
+# Keep only columns that always exist in HDB resale data
+model_df <- train_df %>% select(
+  resale_price,
+  town, flat_type, floor_area_sqm,
+  storey_start, lease_years_left, flat_model
+)
+```
+
+
+```{r}
+#-------------------------------------------------
+# 4. Train/test split
+#-------------------------------------------------
+set.seed(123)
+trainIndex <- createDataPartition(model_df$resale_price, p = 0.8, list = FALSE)
+train <- model_df[trainIndex,]
+test  <- model_df[-trainIndex,]
+```
+
+
+```{r}
+#-------------------------------------------------
+# 5. Random Forest Model
+#-------------------------------------------------
+rf_model <- randomForest(
+  resale_price ~ .,
+  data = train,
+  ntree = 500,
+  importance = TRUE
+)
+
+print(rf_model)
+cat("Model trained successfully\n")
+```
+
+
+```{r}
+#-------------------------------------------------
+# 6. Create prediction dataset (Jul–Sep 2025)
+#    We re-use actual rows but update month
+#-------------------------------------------------
+future_df <- df %>%
+  filter(month >= ym("2025-07") & month <= ym("2025-09")) %>%
+  mutate(
+    town = factor(town, levels = levels(model_df$town)),
+    flat_type = factor(flat_type, levels = levels(model_df$flat_type)),
+    flat_model = factor(flat_model, levels = levels(model_df$flat_model)),
+    storey_start = as.numeric(str_extract(storey_range, "^\\d+")),
+    lease_years_left = 99 - (year(month) - year(lease_commence_date))
+  )
+
+# If there is no real data for Jul–Sep 2025, fallback: 
+# create synthetic months with last known attributes
+if(nrow(future_df) == 0){
+  future_df <- train_df %>%
+    sample_n(200) %>%  # use 200 random past flats
+    mutate(month = sample(seq(ym("2025-07"), ym("2025-09"), by = "months"), n(), replace = TRUE))
+}
+```
+
+
+```{r}
+#-------------------------------------------------
+# 7. Predict
+#-------------------------------------------------
+future_df$predicted_price <- predict(rf_model, newdata = future_df)
+
+# Save to csv
+write_csv(future_df, "predicted_resale_prices_Jul_Sep_2025.csv")
+cat("Predictions saved to predicted_resale_prices_Jul_Sep_2025.csv\n")
+
+```
+
+```{r}
+# Display final prediction results (first 10 rows)
+cat("\n Preview of Predictions (Jul–Sep 2025):\n")
+print(head(future_df %>% 
+             select(month, town, flat_type, floor_area_sqm, predicted_price), 10))
+
+
+```
+
